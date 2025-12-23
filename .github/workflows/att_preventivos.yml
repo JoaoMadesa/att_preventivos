@@ -1,0 +1,41 @@
+name: Atualizar preventivos e cobranca
+
+on:
+  workflow_dispatch:
+
+jobs:
+  atualizar:
+    runs-on: ubuntu-latest
+    env:
+      CF_EMAIL: ${{ secrets.CF_EMAIL }}
+      CF_SENHA: ${{ secrets.CF_SENHA }}
+      GOOGLE_CREDENTIALS_PATH: ${{ github.workspace }}/credentials.json
+      SHEET_ID_PREVENTIVOS: "1N5kJ4Q99J_yCGNRya8KPP7ZIm7GjYurq-zte5KnUCRM"
+      SHEET_RANGE_INPUT_PREVENTIVOS: "PREVENTIVOS!D:D"
+      SHEET_RANGE_OUTPUT_PREVENTIVOS: "PREVENTIVOS!B:B"
+      SHEET_ID_COBRANCA: "1CrKT2UxZOuhpg0iWGY0cAthuQxgsYvVanrBBlv2c6ic"
+      SHEET_RANGE_INPUT_COBRANCA: "RETORNO!A:B"
+      SHEET_RANGE_OUTPUT_COBRANCA: "RETORNO!K:K"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Escrever credenciais do Google
+        run: |
+          echo "${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON_B64 }}" | base64 -d > credentials.json
+
+      - name: Atualizar PREVENTIVOS
+        run: python attStatusPreventivos_preventivos.py
+
+      - name: Atualizar COBRANCA
+        run: python attStatusPreventivos_cobranca.py
