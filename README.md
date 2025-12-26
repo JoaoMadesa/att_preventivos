@@ -22,7 +22,7 @@ pip install -r requirements.txt
 ```
 
 ## Credenciais e secrets
-Os scripts leem credenciais por variaveis de ambiente (quando disponiveis):
+Os scripts leem credenciais por variaveis de ambiente (obrigatorias para login):
 
 - `CF_EMAIL`: email do Confirma Facil
 - `CF_SENHA`: senha do Confirma Facil
@@ -34,11 +34,12 @@ Os scripts leem credenciais por variaveis de ambiente (quando disponiveis):
 - `SHEET_RANGE_INPUT_COBRANCA`
 - `SHEET_RANGE_OUTPUT_COBRANCA`
 
-Valores padrao (hardcoded) continuam no codigo, mas no CI usamos secrets/envs.
+CF_EMAIL e CF_SENHA nao possuem valores padrao; defina no ambiente (secrets no GitHub).
+Outros parametros ainda possuem padrao no codigo.
 
 ## Executar localmente
 1) Ajuste o `GOOGLE_CREDENTIALS_PATH` para o caminho do JSON local.
-2) Defina variaveis de ambiente se quiser sobrescrever o que esta no codigo.
+2) Defina CF_EMAIL e CF_SENHA no ambiente. Ajuste as outras variaveis se quiser sobrescrever o que esta no codigo.
 3) Execute:
 
 ```powershell

@@ -40,6 +40,13 @@ ALL_CODES = ",".join(sorted(ENTREGUE_CODES | CANCELADO_CODES, key=int))
 TIMEOUT = (5, 60)
 
 
+def has_cf_credentials() -> bool:
+    if not os.getenv("CF_EMAIL") or not os.getenv("CF_SENHA"):
+        print("Defina CF_EMAIL e CF_SENHA nas variaveis de ambiente.")
+        return False
+    return True
+
+
 def make_session(max_pool: int = 20, total_retries: int = 3, backoff: float = 0.5) -> requests.Session:
     session = requests.Session()
     retries = Retry(
@@ -92,8 +99,8 @@ class ConfirmaFacilAPI:
     def __init__(self) -> None:
         self.session = make_session(max_pool=20, total_retries=3, backoff=0.5)
         self.token = None
-        self.email = os.getenv("CF_EMAIL", "j.rhoden@madesa.com")
-        self.senha = os.getenv("CF_SENHA", "Jvwr2007@")
+        self.email = os.getenv("CF_EMAIL")
+        self.senha = os.getenv("CF_SENHA")
         self.authenticate()
 
     def authenticate(self) -> bool:
@@ -259,6 +266,8 @@ def save_excel_safely(df: pd.DataFrame, path: str) -> None:
 
 
 def main() -> None:
+    if not has_cf_credentials():
+        return
     pares, raw_values, has_header = load_inputs_from_sheet()
     if not raw_values:
         print("Nenhum dado encontrado no Google Sheets.")
