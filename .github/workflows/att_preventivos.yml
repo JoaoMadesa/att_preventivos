@@ -34,7 +34,7 @@ jobs:
           echo "${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON_B64 }}" | base64 -d > credentials.json
 
       - name: Atualizar PREVENTIVOS
-        run: python attStatusPreventivos_preventivos.py
+        run: python -u attStatusPreventivos_preventivos.py
 
       - name: Atualizar COBRANCA
-        run: python attStatusPreventivos_cobranca.py
+        run: python -u attStatusPreventivos_cobranca.py

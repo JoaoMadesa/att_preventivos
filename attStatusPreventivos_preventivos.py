@@ -184,8 +184,15 @@ def extract_codigo(item: dict) -> str:
 def resolver_status(chaves_extraidas: List[Tuple[str, str, str]]) -> Dict[Tuple[str, str, str], str]:
     api = ConfirmaFacilAPI()
     status_map = {}
+    total = len(chaves_extraidas)
+    print(f"Iniciando consultas na API: {total} registros.", flush=True)
 
-    for numero_nf, serie, cnpj in chaves_extraidas:
+    for idx, (numero_nf, serie, cnpj) in enumerate(chaves_extraidas, start=1):
+        if ENABLE_ROW_LOGS:
+            print(
+                f"[API] {idx}/{total} consultando NF={numero_nf} SERIE={serie} ESTAB={cnpj}",
+                flush=True,
+            )
         ocorrencias = api.fetch_ocorrencias(numero_nf, serie, cnpj)
         entregue = False
         cancelado = False
@@ -203,6 +210,11 @@ def resolver_status(chaves_extraidas: List[Tuple[str, str, str]]) -> Dict[Tuple[
             status_map[(numero_nf, serie, cnpj)] = "CANCELADO"
         else:
             status_map[(numero_nf, serie, cnpj)] = "DESPACHADO"
+        if ENABLE_ROW_LOGS:
+            print(
+                f"[API] {idx}/{total} concluido -> {status_map[(numero_nf, serie, cnpj)]}",
+                flush=True,
+            )
 
     return status_map
 
@@ -297,7 +309,12 @@ def main() -> None:
         return
 
     validas = [(nf, serie, cnpj) for nf, serie, cnpj in chaves_extraidas if nf and serie and cnpj]
+    print(
+        f"Leitura finalizada: {len(raw_values) - 1} linhas de entrada, {len(validas)} linhas validas para consulta.",
+        flush=True,
+    )
     chaves_unicas = list(dict.fromkeys(validas))
+    print(f"Total de chaves unicas para API: {len(chaves_unicas)}", flush=True)
     status_map = resolver_status(chaves_unicas)
 
     statuses = []
