@@ -141,6 +141,7 @@ class ConfirmaFacilAPI:
         params = {
             "numero": nf,
             "cnpjEmbarcador": cnpj,
+            "serie":"1",
             "codigoOcorrencia": ALL_CODES,
         }
         payload = self._request(params)

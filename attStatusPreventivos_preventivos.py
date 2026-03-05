@@ -1,8 +1,8 @@
 import json
 import os
 import time
-from datetime import datetime, timedelta
-from typing import Dict, Iterable, List, Tuple
+from datetime import datetime
+from typing import Dict, List, Tuple
 
 import pandas as pd
 import requests
@@ -26,7 +26,7 @@ OUTPUT_NAME = "STATUS_PEDIDOS.xlsx"
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 SHEET_ID = os.getenv("SHEET_ID_PREVENTIVOS", "1N5kJ4Q99J_yCGNRya8KPP7ZIm7GjYurq-zte5KnUCRM")
-SHEET_RANGE_INPUT = os.getenv("SHEET_RANGE_INPUT_PREVENTIVOS", "PREVENTIVOS!D:D")
+SHEET_RANGE_INPUT = os.getenv("SHEET_RANGE_INPUT_PREVENTIVOS", "PREVENTIVOS!C:C")
 SHEET_RANGE_OUTPUT = os.getenv("SHEET_RANGE_OUTPUT_PREVENTIVOS", "PREVENTIVOS!B:B")
 CREDENTIALS_PATH = os.getenv(
     "GOOGLE_CREDENTIALS_PATH",
@@ -38,7 +38,6 @@ CANCELADO_CODES = {"25", "102", "203", "303", "325", "327"}
 ALL_CODES = ",".join(sorted(ENTREGUE_CODES | CANCELADO_CODES, key=int))
 
 PAGE_SIZE = 1000
-SUBLOTE_SIZE = 20
 TIMEOUT = (5, 60)
 
 
@@ -67,23 +66,32 @@ def make_session(max_pool: int = 20, total_retries: int = 3, backoff: float = 0.
     return session
 
 
-def normalize_pedido(value: object) -> str:
+def normalize_chave_nfe(value: object) -> str:
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return ""
-    if isinstance(value, int):
-        return str(value)
-    if isinstance(value, float):
-        if value.is_integer():
-            return str(int(value))
     text = str(value).strip()
-    if text.endswith(".0") and text[:-2].isdigit():
-        return text[:-2]
-    return text
+    if not text:
+        return ""
+    return "".join(ch for ch in text if ch.isdigit())
 
 
-def chunked(items: List[str], size: int) -> Iterable[List[str]]:
-    for i in range(0, len(items), size):
-        yield items[i:i + size]
+def strip_left_zeros(value: str) -> str:
+    stripped = value.lstrip("0")
+    return stripped if stripped else "0"
+
+
+def extract_nfe_fields(chave_nfe: str) -> Tuple[str, str, str]:
+    if len(chave_nfe) < 34:
+        return "", "", ""
+
+    cnpj = chave_nfe[6:20]
+    serie = chave_nfe[22:25]
+    numero_nf = chave_nfe[25:34]
+
+    if len(cnpj) != 14 or len(serie) != 3 or len(numero_nf) != 9:
+        return "", "", ""
+
+    return numero_nf, serie, cnpj
 
 
 class ConfirmaFacilAPI:
@@ -128,36 +136,41 @@ class ConfirmaFacilAPI:
                 time.sleep(2 * attempt)
         return {"respostas": []}
 
-    def fetch_ocorrencias(self, pedidos: List[str]) -> List[dict]:
-        data_final = datetime.now()
-        data_inicial = data_final - timedelta(days=600)
-        params = {
-            "pedido": ",".join(pedidos),
-            "page": 0,
-            "size": PAGE_SIZE,
-            "de": data_inicial.strftime("%Y/%m/%d 00:00:00"),
-            "ate": data_final.strftime("%Y/%m/%d 23:59:59"),
-            "codigoOcorrencia": ALL_CODES,
-            "tipoData": "OCORRENCIA",
-        }
+    def fetch_ocorrencias(self, numero_nf: str, serie: str, cnpj: str) -> List[dict]:
+        variants = [
+            (numero_nf, serie),
+            (strip_left_zeros(numero_nf), strip_left_zeros(serie)),
+        ]
 
-        payload = self._request(params)
-        respostas = payload.get("respostas", []) or []
-        total_pages = int(payload.get("totalPages", 0) or 0)
+        seen = set()
+        for numero_consulta, serie_consulta in variants:
+            variant_key = (numero_consulta, serie_consulta)
+            if variant_key in seen:
+                continue
+            seen.add(variant_key)
 
-        for page in range(1, total_pages):
-            params["page"] = page
-            page_payload = self._request(params)
-            respostas.extend(page_payload.get("respostas", []) or [])
+            params = {
+                "numero": numero_consulta,
+                "serie": serie_consulta,
+                "cnpjEmbarcador": cnpj,
+                "codigoOcorrencia": ALL_CODES,
+                "page": 0,
+                "size": PAGE_SIZE,
+            }
 
-        return respostas
+            payload = self._request(params)
+            respostas = payload.get("respostas", []) or []
+            total_pages = int(payload.get("totalPages", 0) or 0)
 
+            for page in range(1, total_pages):
+                params["page"] = page
+                page_payload = self._request(params)
+                respostas.extend(page_payload.get("respostas", []) or [])
 
-def extract_pedido(item: dict) -> str:
-    pedido = (item.get("pedido") or {}).get("numero")
-    if not pedido:
-        pedido = ((item.get("embarque") or {}).get("pedido") or {}).get("numero")
-    return normalize_pedido(pedido)
+            if respostas:
+                return respostas
+
+        return []
 
 
 def extract_codigo(item: dict) -> str:
@@ -167,34 +180,33 @@ def extract_codigo(item: dict) -> str:
     return str(codigo).strip()
 
 
-def resolver_status(pedidos: List[str]) -> Dict[str, str]:
+def resolver_status(chaves_extraidas: List[Tuple[str, str, str]]) -> Dict[Tuple[str, str, str], str]:
     api = ConfirmaFacilAPI()
-    flags = {pedido: {"entregue": False, "cancelado": False} for pedido in pedidos}
-
-    for sublote in chunked(pedidos, SUBLOTE_SIZE):
-        ocorrencias = api.fetch_ocorrencias(sublote)
-        for item in ocorrencias:
-            pedido = extract_pedido(item)
-            codigo = extract_codigo(item)
-            if not pedido or pedido not in flags:
-                continue
-            if codigo in ENTREGUE_CODES:
-                flags[pedido]["entregue"] = True
-            if codigo in CANCELADO_CODES:
-                flags[pedido]["cancelado"] = True
-
     status_map = {}
-    for pedido, info in flags.items():
-        if info["entregue"]:
-            status_map[pedido] = "ENTREGUE"
-        elif info["cancelado"]:
-            status_map[pedido] = "CANCELADO"
+
+    for numero_nf, serie, cnpj in chaves_extraidas:
+        ocorrencias = api.fetch_ocorrencias(numero_nf, serie, cnpj)
+        entregue = False
+        cancelado = False
+
+        for item in ocorrencias:
+            codigo = extract_codigo(item)
+            if codigo in ENTREGUE_CODES:
+                entregue = True
+            if codigo in CANCELADO_CODES:
+                cancelado = True
+
+        if entregue:
+            status_map[(numero_nf, serie, cnpj)] = "ENTREGUE"
+        elif cancelado:
+            status_map[(numero_nf, serie, cnpj)] = "CANCELADO"
         else:
-            status_map[pedido] = "DESPACHADO"
+            status_map[(numero_nf, serie, cnpj)] = "DESPACHADO"
+
     return status_map
 
 
-def load_pedidos_from_sheet() -> Tuple[List[str], List[str], bool]:
+def load_chaves_from_sheet() -> Tuple[List[Tuple[str, str, str]], List[str], bool]:
     if Credentials is None or build is None:
         print("Dependencias do Google Sheets nao encontradas. Instale google-auth e google-api-python-client.")
         return [], [], False
@@ -213,17 +225,22 @@ def load_pedidos_from_sheet() -> Tuple[List[str], List[str], bool]:
         return [], [], False
 
     first_col = [row[0] if row else "" for row in values]
+
     start_index = 0
     has_header = False
     if first_col:
         header = str(first_col[0]).strip().lower()
-        if header in {"pedido", "pedidos"}:
+        if header in {"chave", "chave nf", "chave nfe", "chave de acesso", "chave de acesso nfe"}:
             start_index = 1
             has_header = True
 
-    pedidos = [normalize_pedido(v) for v in first_col[start_index:]]
-    pedidos = [p for p in pedidos if p and str(p).strip().lower() != "nan"]
-    return pedidos, first_col, has_header
+    chaves_extraidas = []
+    for raw in first_col[start_index:]:
+        chave = normalize_chave_nfe(raw)
+        numero_nf, serie, cnpj = extract_nfe_fields(chave)
+        chaves_extraidas.append((numero_nf, serie, cnpj))
+
+    return chaves_extraidas, first_col, has_header
 
 
 def update_status_in_sheet(values_count: int, statuses: List[str], has_header: bool) -> None:
@@ -267,26 +284,35 @@ def save_excel_safely(df: pd.DataFrame, path: str) -> None:
 def main() -> None:
     if not has_cf_credentials():
         return
-    pedidos_list, raw_values, has_header = load_pedidos_from_sheet()
+
+    chaves_extraidas, raw_values, has_header = load_chaves_from_sheet()
     if not raw_values:
-        print("Nenhum pedido encontrado no Google Sheets.")
+        print("Nenhuma chave encontrada no Google Sheets.")
         return
 
-    pedidos_unicos = list(dict.fromkeys(pedidos_list))
-    status_map = resolver_status(pedidos_unicos)
+    validas = [(nf, serie, cnpj) for nf, serie, cnpj in chaves_extraidas if nf and serie and cnpj]
+    chaves_unicas = list(dict.fromkeys(validas))
+    status_map = resolver_status(chaves_unicas)
 
     statuses = []
-    start_index = 1 if has_header else 0
-    for value in raw_values[start_index:]:
-        pedido = normalize_pedido(value)
-        if not pedido:
+    for nf, serie, cnpj in chaves_extraidas:
+        if not nf or not serie or not cnpj:
             statuses.append("")
         else:
-            statuses.append(status_map.get(pedido, "DESPACHADO"))
+            statuses.append(status_map.get((nf, serie, cnpj), "DESPACHADO"))
 
     update_status_in_sheet(len(raw_values), statuses, has_header)
 
-    rows = [{"PEDIDO": p, "STATUS": status_map.get(p, "DESPACHADO")} for p in pedidos_list if p]
+    rows = [
+        {
+            "NF": nf,
+            "SERIE": serie,
+            "ESTABELECIMENTO": cnpj,
+            "STATUS": status_map.get((nf, serie, cnpj), "DESPACHADO"),
+        }
+        for nf, serie, cnpj in validas
+    ]
+
     df_final = pd.DataFrame(rows)
     if df_final.empty:
         print("Nada para salvar.")
