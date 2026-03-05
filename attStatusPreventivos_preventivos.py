@@ -39,6 +39,7 @@ ALL_CODES = ",".join(sorted(ENTREGUE_CODES | CANCELADO_CODES, key=int))
 
 PAGE_SIZE = 1000
 TIMEOUT = (5, 60)
+ENABLE_ROW_LOGS = os.getenv("LOG_LINHAS_PREVENTIVOS", "1").strip() == "1"
 
 
 def has_cf_credentials() -> bool:
@@ -206,56 +207,61 @@ def resolver_status(chaves_extraidas: List[Tuple[str, str, str]]) -> Dict[Tuple[
     return status_map
 
 
-def load_chaves_from_sheet() -> Tuple[List[Tuple[str, str, str]], List[str], bool]:
+def load_chaves_from_sheet() -> Tuple[List[Tuple[str, str, str]], List[str]]:
     if Credentials is None or build is None:
         print("Dependencias do Google Sheets nao encontradas. Instale google-auth e google-api-python-client.")
-        return [], [], False
+        return [], []
     if not os.path.exists(CREDENTIALS_PATH):
         print(f"Arquivo de credenciais nao encontrado: {CREDENTIALS_PATH}")
-        return [], [], False
+        return [], []
     if SHEET_ID == "COLE_AQUI_O_ID_DA_PLANILHA":
         print("Atualize o SHEET_ID no script antes de executar.")
-        return [], [], False
+        return [], []
 
     creds = Credentials.from_service_account_file(CREDENTIALS_PATH, scopes=SCOPES)
     service = build("sheets", "v4", credentials=creds)
     result = service.spreadsheets().values().get(spreadsheetId=SHEET_ID, range=SHEET_RANGE_INPUT).execute()
     values = result.get("values", [])
     if not values:
-        return [], [], False
+        return [], []
 
     first_col = [row[0] if row else "" for row in values]
 
-    start_index = 0
-    has_header = False
-    if first_col:
-        header = str(first_col[0]).strip().lower()
-        if header in {"chave", "chave nf", "chave nfe", "chave de acesso", "chave de acesso nfe"}:
-            start_index = 1
-            has_header = True
-
+    # A linha 1 fica reservada e nao deve ser alterada.
+    input_values = first_col[1:] if len(first_col) > 1 else []
     chaves_extraidas = []
-    for raw in first_col[start_index:]:
+    for raw in input_values:
         chave = normalize_chave_nfe(raw)
         numero_nf, serie, cnpj = extract_nfe_fields(chave)
         chaves_extraidas.append((numero_nf, serie, cnpj))
 
-    return chaves_extraidas, first_col, has_header
+    return chaves_extraidas, first_col
 
 
-def update_status_in_sheet(values_count: int, statuses: List[str], has_header: bool) -> None:
+def build_output_range_from_row2(output_range: str, count: int) -> str:
+    if "!" in output_range:
+        sheet, cols = output_range.split("!", 1)
+    else:
+        sheet, cols = "", output_range
+    col = cols.split(":")[0].strip()
+    col_letters = "".join(ch for ch in col if ch.isalpha()) or "B"
+    start_row = 2
+    end_row = start_row + max(count, 1) - 1
+    if sheet:
+        return f"{sheet}!{col_letters}{start_row}:{col_letters}{end_row}"
+    return f"{col_letters}{start_row}:{col_letters}{end_row}"
+
+
+def update_status_in_sheet(statuses: List[str]) -> None:
     creds = Credentials.from_service_account_file(CREDENTIALS_PATH, scopes=SCOPES)
     service = build("sheets", "v4", credentials=creds)
 
-    output_values = []
-    if has_header:
-        output_values.append(["STATUS"])
+    output_values = [[s] for s in statuses]
+    if not output_values:
+        print("Nenhum status para atualizar na planilha.")
+        return
 
-    output_values.extend([[s] for s in statuses])
-
-    total_rows = max(values_count, len(output_values))
-    end_row = total_rows if total_rows > 0 else 1
-    output_range = f"{SHEET_RANGE_OUTPUT.split('!')[0]}!B1:B{end_row}"
+    output_range = build_output_range_from_row2(SHEET_RANGE_OUTPUT, len(output_values))
 
     body = {"values": output_values}
     service.spreadsheets().values().update(
@@ -285,8 +291,8 @@ def main() -> None:
     if not has_cf_credentials():
         return
 
-    chaves_extraidas, raw_values, has_header = load_chaves_from_sheet()
-    if not raw_values:
+    chaves_extraidas, raw_values = load_chaves_from_sheet()
+    if not raw_values or len(raw_values) <= 1:
         print("Nenhuma chave encontrada no Google Sheets.")
         return
 
@@ -295,13 +301,24 @@ def main() -> None:
     status_map = resolver_status(chaves_unicas)
 
     statuses = []
-    for nf, serie, cnpj in chaves_extraidas:
-        if not nf or not serie or not cnpj:
+    input_values = raw_values[1:]
+    for idx, (raw, (nf, serie, cnpj)) in enumerate(zip(input_values, chaves_extraidas), start=2):
+        chave_normalizada = normalize_chave_nfe(raw)
+        if not chave_normalizada:
             statuses.append("")
+            if ENABLE_ROW_LOGS:
+                print(f"Linha {idx}: chave vazia -> status em branco")
+        elif not nf or not serie or not cnpj:
+            statuses.append("DESPACHADO")
+            if ENABLE_ROW_LOGS:
+                print(f"Linha {idx}: chave invalida ({chave_normalizada}) -> DESPACHADO")
         else:
-            statuses.append(status_map.get((nf, serie, cnpj), "DESPACHADO"))
+            status = status_map.get((nf, serie, cnpj), "DESPACHADO")
+            statuses.append(status)
+            if ENABLE_ROW_LOGS:
+                print(f"Linha {idx}: NF {nf} | SERIE {serie} | ESTAB {cnpj} -> {status}")
 
-    update_status_in_sheet(len(raw_values), statuses, has_header)
+    update_status_in_sheet(statuses)
 
     rows = [
         {
