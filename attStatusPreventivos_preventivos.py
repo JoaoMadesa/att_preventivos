@@ -2,6 +2,8 @@ import json
 import os
 import time
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock, local
 from typing import Dict, List, Tuple
 
 import pandas as pd
@@ -40,6 +42,7 @@ ALL_CODES = ",".join(sorted(ENTREGUE_CODES | CANCELADO_CODES, key=int))
 PAGE_SIZE = 1000
 TIMEOUT = (5, 60)
 ENABLE_ROW_LOGS = os.getenv("LOG_LINHAS_PREVENTIVOS", "1").strip() == "1"
+MAX_WORKERS = max(1, int(os.getenv("MAX_WORKERS_PREVENTIVOS", "8")))
 
 
 def has_cf_credentials() -> bool:
@@ -138,40 +141,25 @@ class ConfirmaFacilAPI:
         return {"respostas": []}
 
     def fetch_ocorrencias(self, numero_nf: str, serie: str, cnpj: str) -> List[dict]:
-        variants = [
-            (numero_nf, serie),
-            (strip_left_zeros(numero_nf), strip_left_zeros(serie)),
-        ]
+        params = {
+            "numero": strip_left_zeros(numero_nf),
+            "serie": strip_left_zeros(serie),
+            "cnpjEmbarcador": cnpj,
+            "codigoOcorrencia": ALL_CODES,
+            "page": 0,
+            "size": PAGE_SIZE,
+        }
 
-        seen = set()
-        for numero_consulta, serie_consulta in variants:
-            variant_key = (numero_consulta, serie_consulta)
-            if variant_key in seen:
-                continue
-            seen.add(variant_key)
+        payload = self._request(params)
+        respostas = payload.get("respostas", []) or []
+        total_pages = int(payload.get("totalPages", 0) or 0)
 
-            params = {
-                "numero": numero_consulta,
-                "serie": serie_consulta,
-                "cnpjEmbarcador": cnpj,
-                "codigoOcorrencia": ALL_CODES,
-                "page": 0,
-                "size": PAGE_SIZE,
-            }
+        for page in range(1, total_pages):
+            params["page"] = page
+            page_payload = self._request(params)
+            respostas.extend(page_payload.get("respostas", []) or [])
 
-            payload = self._request(params)
-            respostas = payload.get("respostas", []) or []
-            total_pages = int(payload.get("totalPages", 0) or 0)
-
-            for page in range(1, total_pages):
-                params["page"] = page
-                page_payload = self._request(params)
-                respostas.extend(page_payload.get("respostas", []) or [])
-
-            if respostas:
-                return respostas
-
-        return []
+        return respostas
 
 
 def extract_codigo(item: dict) -> str:
@@ -182,39 +170,63 @@ def extract_codigo(item: dict) -> str:
 
 
 def resolver_status(chaves_extraidas: List[Tuple[str, str, str]]) -> Dict[Tuple[str, str, str], str]:
-    api = ConfirmaFacilAPI()
     status_map = {}
     total = len(chaves_extraidas)
     print(f"Iniciando consultas na API: {total} registros.", flush=True)
+    if total == 0:
+        return status_map
 
-    for idx, (numero_nf, serie, cnpj) in enumerate(chaves_extraidas, start=1):
+    tls = local()
+    completed = 0
+    completed_lock = Lock()
+
+    def get_thread_api() -> ConfirmaFacilAPI:
+        if not hasattr(tls, "api"):
+            tls.api = ConfirmaFacilAPI()
+        return tls.api
+
+    def process_one(item: Tuple[int, Tuple[str, str, str]]) -> Tuple[Tuple[str, str, str], str]:
+        idx, (numero_nf, serie, cnpj) = item
         if ENABLE_ROW_LOGS:
             print(
                 f"[API] {idx}/{total} consultando NF={numero_nf} SERIE={serie} ESTAB={cnpj}",
                 flush=True,
             )
+        api = get_thread_api()
         ocorrencias = api.fetch_ocorrencias(numero_nf, serie, cnpj)
         entregue = False
         cancelado = False
 
-        for item in ocorrencias:
-            codigo = extract_codigo(item)
+        for item_resp in ocorrencias:
+            codigo = extract_codigo(item_resp)
             if codigo in ENTREGUE_CODES:
                 entregue = True
             if codigo in CANCELADO_CODES:
                 cancelado = True
 
         if entregue:
-            status_map[(numero_nf, serie, cnpj)] = "ENTREGUE"
+            status = "ENTREGUE"
         elif cancelado:
-            status_map[(numero_nf, serie, cnpj)] = "CANCELADO"
+            status = "CANCELADO"
         else:
-            status_map[(numero_nf, serie, cnpj)] = "DESPACHADO"
+            status = "DESPACHADO"
+
         if ENABLE_ROW_LOGS:
-            print(
-                f"[API] {idx}/{total} concluido -> {status_map[(numero_nf, serie, cnpj)]}",
-                flush=True,
-            )
+            print(f"[API] {idx}/{total} concluido -> {status}", flush=True)
+        return (numero_nf, serie, cnpj), status
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = [
+            executor.submit(process_one, (idx, chave))
+            for idx, chave in enumerate(chaves_extraidas, start=1)
+        ]
+        for future in as_completed(futures):
+            chave, status = future.result()
+            status_map[chave] = status
+            with completed_lock:
+                completed += 1
+                if not ENABLE_ROW_LOGS and (completed % 25 == 0 or completed == total):
+                    print(f"[API] progresso: {completed}/{total}", flush=True)
 
     return status_map
 
