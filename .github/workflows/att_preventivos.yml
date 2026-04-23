@@ -2,8 +2,6 @@ name: Atualizar preventivos e cobranca
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "50 9 * * *"
 
 jobs:
   atualizar:
